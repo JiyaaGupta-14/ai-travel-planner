@@ -1,0 +1,60 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String   @id @default(uuid())
+  email     String   @unique
+  name      String?
+  createdAt DateTime @default(now())
+  trips     Trip[]
+}
+
+model Trip {
+  id          String    @id @default(uuid())
+  userId      String
+  user        User      @relation(fields: [userId], references: [id])
+  destination String
+  budget      Float
+  startDate   DateTime
+  endDate     DateTime
+  createdAt   DateTime  @default(now())
+  days        TripDay[]
+}
+
+model TripDay {
+  id        String     @id @default(uuid())
+  tripId    String
+  trip      Trip       @relation(fields: [tripId], references: [id])
+  dayNumber Int
+  narrative String?
+  stops     TripStop[]
+}
+
+model TripStop {
+  id          String  @id @default(uuid())
+  tripDayId   String
+  tripDay     TripDay @relation(fields: [tripDayId], references: [id])
+  placeId     String
+  place       Place   @relation(fields: [placeId], references: [id])
+  orderInDay  Int
+  arrivalTime String?
+}
+
+model Place {
+  id            String     @id @default(uuid())
+  googlePlaceId String     @unique
+  name          String
+  category      String?
+  latitude      Float
+  longitude     Float
+  priceLevel    Int?
+  rating        Float?
+  description   String?
+  stops         TripStop[]
+}

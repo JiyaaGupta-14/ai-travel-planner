@@ -10,5 +10,9 @@ export async function embedText(text: string): Promise<number[]> {
     model: "gemini-embedding-001",
     contents: text,
   });
-  return result.embeddings[0].values;
+  const values = result.embeddings?.[0]?.values;
+  if (!values) {
+    throw new Error("Failed to generate embedding");
+  }
+  return values;
 }

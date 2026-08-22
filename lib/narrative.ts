@@ -14,7 +14,7 @@ The stops for this day, in visiting order, are: ${stopNames}.
 Mention the order naturally (e.g. "start at X, then head to Y"). Keep it concise and avoid generic filler.`;
 
   const result = await ai.models.generateContent({
-    model: "gemini-3.6-flash",
+    model: "gemini-3.5-flash-lite",
     contents: prompt,
   });
 

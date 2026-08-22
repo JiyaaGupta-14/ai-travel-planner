@@ -8,11 +8,13 @@ export default function Home() {
   const [days, setDays] = useState(3);
   const [loading, setLoading] = useState(false);
   const [itinerary, setItinerary] = useState<any[]>([]);
+  const [saved, setSaved] = useState(false);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setLoading(true);
     setItinerary([]);
+    setSaved(false);
 
     const res = await fetch("/api/plan-trip", {
       method: "POST",
@@ -23,6 +25,15 @@ export default function Home() {
     const data = await res.json();
     setItinerary(data.itinerary || []);
     setLoading(false);
+  }
+
+  async function handleSave() {
+    const res = await fetch("/api/save-trip", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ destination, budget, itinerary }),
+    });
+    if (res.ok) setSaved(true);
   }
 
   return (
@@ -67,6 +78,12 @@ export default function Home() {
           <small>Total distance: {day.totalDistanceKm} km</small>
         </div>
       ))}
+
+      {itinerary.length > 0 && (
+        <button onClick={handleSave} style={{ marginTop: "1rem" }}>
+          {saved ? "Saved ✓" : "Save Trip"}
+        </button>
+      )}
     </main>
   );
 }

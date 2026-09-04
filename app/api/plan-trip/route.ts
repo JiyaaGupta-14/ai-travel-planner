@@ -54,7 +54,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const dayPlans = buildUniversalItinerary(
+    const dayPlans = await buildUniversalItinerary(
       places.map((p) => ({
         id: p.id,
         name: p.name,

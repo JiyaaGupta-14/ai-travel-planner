@@ -15,9 +15,12 @@ const testPlaces = [
   { id: "12", name: "Fontana Giuseppe Grandi", latitude: 45.4695, longitude: 9.2135, category: "landmark" },
 ];
 
-const itinerary = buildUniversalItinerary(testPlaces, {
-  numDays: 4,
-  totalBudgetUsd: 1200,
-});
+async function main() {
+  const itinerary = await buildUniversalItinerary(testPlaces, {
+    numDays: 4,
+    totalBudgetUsd: 1200,
+  });
+  console.log(JSON.stringify(itinerary, null, 2));
+}
 
-console.log(JSON.stringify(itinerary, null, 2));
+main();

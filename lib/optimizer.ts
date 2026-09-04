@@ -1,4 +1,5 @@
 import { haversineDistance } from "./distance";
+import { getWalkingDistanceMatrix } from "./distanceMatrix";
 
 export interface NamedDistrict {
   name: string;
@@ -46,8 +47,8 @@ const AVG_WALKING_SPEED_KMH = 4.0;
 const MEAL_DURATION_MIN = 60;
 const BALANCE_PENALTY_KM_PER_EXCESS_STOP = 0.4;
 
-const MIN_DAY_DURATION_MIN = 120; // At least 2 hours of active time per day
-const MAX_DAY_DURATION_MIN = 330; // At most 5.5 hours of active time per day
+const MIN_DAY_DURATION_MIN = 120;
+const MAX_DAY_DURATION_MIN = 330;
 
 function isMuseumCategory(place: OptimizerPlace): boolean {
   const category = place.category?.toLowerCase() || "";
@@ -385,8 +386,10 @@ function nearestNeighborOrder(places: OptimizerPlace[]): OptimizerPlace[] {
   return ordered;
 }
 
-
-function computeLegs(route: OptimizerPlace[]): RouteLeg[] {
+// Fallback leg computation using straight-line distance — used if the
+// Distance Matrix API call fails (quota, network, etc.) so the app still
+// works, just with slightly less accurate travel-time estimates.
+function computeLegsHaversine(route: OptimizerPlace[]): RouteLeg[] {
   const legs: RouteLeg[] = [];
   for (let i = 0; i < route.length - 1; i++) {
     const distanceKm = haversineDistance(
@@ -404,11 +407,43 @@ function computeLegs(route: OptimizerPlace[]): RouteLeg[] {
   return legs;
 }
 
-// Inserts a lunch stop roughly at the midpoint of the day's route — placed
-// after whichever real stop is closest to the halfway mark by cumulative
-// visit+travel time, so lunch lands naturally mid-day rather than at a
-// fixed stop index regardless of how long the morning ran.
-function insertLunch(route: OptimizerPlace[], destination: string): OptimizerPlace[] {
+// Real walking distances/times via Google's Distance Matrix API, computed
+// once per day's final route (not during the optimizer's internal search
+// loop, which still uses fast haversine for speed). Falls back to
+// haversine estimates if the API call fails for any reason.
+async function computeLegsReal(route: OptimizerPlace[]): Promise<RouteLeg[]> {
+  if (route.length < 2) return [];
+
+  try {
+    const points = route.map((p) => ({ lat: p.latitude, lon: p.longitude }));
+    const { distanceKm, durationMin } = await getWalkingDistanceMatrix(points);
+
+    const legs: RouteLeg[] = [];
+    for (let i = 0; i < route.length - 1; i++) {
+      const d = distanceKm[i][i + 1];
+      const t = durationMin[i][i + 1];
+      if (!isFinite(d) || !isFinite(t)) {
+        // Missing pair from the API — fall back to haversine for this leg only
+        const fallback = computeLegsHaversine([route[i], route[i + 1]])[0];
+        legs.push(fallback);
+        continue;
+      }
+      legs.push({
+        fromName: route[i].name,
+        toName: route[i + 1].name,
+        distanceKm: Math.round(d * 10) / 10,
+        travelTimeMin: Math.round(t),
+      });
+    }
+    return legs;
+  } catch (err) {
+    console.error("Distance Matrix failed, falling back to haversine:", err);
+    return computeLegsHaversine(route);
+  }
+}
+
+// Inserts a lunch stop roughly at the midpoint of the day's route.
+function insertLunch(route: OptimizerPlace[]): OptimizerPlace[] {
   if (route.length === 0) return route;
 
   let cumulative = 0;
@@ -462,27 +497,25 @@ function twoOptImprove(route: OptimizerPlace[]): OptimizerPlace[] {
   return best;
 }
 
-function orderStopsByProximity(
-  places: OptimizerPlace[],
-  destination: string
-): { ordered: OptimizerPlace[]; totalDistanceKm: number; legs: RouteLeg[] } {
+// Route ordering: fast haversine-based nearest-neighbor + 2-opt for the
+// actual sequencing (cheap, runs many times internally), but the final
+// displayed leg data (distance/time between consecutive stops) uses real
+// Google Distance Matrix routing for accuracy.
+async function orderStopsByProximity(
+  places: OptimizerPlace[]
+): Promise<{ ordered: OptimizerPlace[]; totalDistanceKm: number; legs: RouteLeg[] }> {
   if (places.length === 0) return { ordered: [], totalDistanceKm: 0, legs: [] };
   const initial = nearestNeighborOrder(places);
   const improved = twoOptImprove(initial);
-  const withLunch = insertLunch(improved, destination);
-  const legs = computeLegs(withLunch);
-  return {
-    ordered: withLunch,
-    totalDistanceKm: totalRouteDistance(withLunch),
-    legs,
-  };
+  const withLunch = insertLunch(improved);
+  const legs = await computeLegsReal(withLunch);
+  const totalDistanceKm = legs.reduce((sum, l) => sum + l.distanceKm, 0);
+  return { ordered: withLunch, totalDistanceKm, legs };
 }
 
-function recalculateDayMetrics(day: DayPlan, dailyBudgetUsd: number): void {
-  // Strip any previously-inserted lunch stop before recalculating, so we
-  // don't accumulate duplicate lunch entries across multiple rebalance passes
+async function recalculateDayMetrics(day: DayPlan, dailyBudgetUsd: number): Promise<void> {
   const realStops = day.stops.filter((s) => s.category !== "dining");
-  const { ordered, totalDistanceKm, legs } = orderStopsByProximity(realStops, "");
+  const { ordered, totalDistanceKm, legs } = await orderStopsByProximity(realStops);
   const groupedForMetrics = ordered.filter((s) => s.category !== "dining").map((s) => [s]);
   const { durationMin, estimatedCost } = calculateClusterMetrics(groupedForMetrics, dailyBudgetUsd);
 
@@ -493,18 +526,7 @@ function recalculateDayMetrics(day: DayPlan, dailyBudgetUsd: number): void {
   day.estimatedDayCostUsd = Math.round(estimatedCost);
 }
 
-
-/**
- * Final safety-net pass operating directly on the finished DayPlan array.
- * Even after cluster-level rebalancing, a day can still end up under the
- * minimum workload (e.g. a lone outlier like a far-east fountain) or over
- * the maximum. This pass moves individual stops — picking whichever stop
- * on the overloaded day is geographically closest to the underloaded day —
- * from over-filled days into under-filled ones, then recalculates both
- * days' metrics and re-runs route ordering so the moved stop is inserted
- * sensibly rather than just appended.
- */
-function enforceStrictDayLimits(days: DayPlan[], dailyBudgetUsd: number): DayPlan[] {
+async function enforceStrictDayLimits(days: DayPlan[], dailyBudgetUsd: number): Promise<DayPlan[]> {
   const underloaded = days.filter((d) => d.totalDurationMin < MIN_DAY_DURATION_MIN);
   const overloaded = days.filter((d) => d.totalDurationMin > MAX_DAY_DURATION_MIN);
 
@@ -534,8 +556,8 @@ function enforceStrictDayLimits(days: DayPlan[], dailyBudgetUsd: number): DayPla
         const [movedStop] = heavyDay.stops.splice(bestStopIdx, 1);
         emptyDay.stops.push(movedStop);
 
-        recalculateDayMetrics(heavyDay, dailyBudgetUsd);
-        recalculateDayMetrics(emptyDay, dailyBudgetUsd);
+        await recalculateDayMetrics(heavyDay, dailyBudgetUsd);
+        await recalculateDayMetrics(emptyDay, dailyBudgetUsd);
 
         if (emptyDay.totalDurationMin >= MIN_DAY_DURATION_MIN) break;
       }
@@ -545,7 +567,10 @@ function enforceStrictDayLimits(days: DayPlan[], dailyBudgetUsd: number): DayPla
   return days.filter((d) => d.stops.length > 0);
 }
 
-export function buildUniversalItinerary(places: OptimizerPlace[], constraints: TripConstraints): DayPlan[] {
+export async function buildUniversalItinerary(
+  places: OptimizerPlace[],
+  constraints: TripConstraints
+): Promise<DayPlan[]> {
   if (places.length === 0 || constraints.numDays <= 0) return [];
 
   const {
@@ -569,11 +594,12 @@ export function buildUniversalItinerary(places: OptimizerPlace[], constraints: T
   clusters = rebalanceClusters(clusters, minSize, maxSize, maxDailyMinutes, dailyBudgetUsd, maxMuseumsPerDay);
 
   let days: DayPlan[] = [];
-    clusters.forEach((clusterGroups, idx) => {
-    const dayPlaces = clusterGroups.flat();
-    if (dayPlaces.length === 0) return;
 
-    const { ordered, totalDistanceKm, legs } = orderStopsByProximity(dayPlaces, "");
+  for (const [idx, clusterGroups] of clusters.entries()) {
+    const dayPlaces = clusterGroups.flat();
+    if (dayPlaces.length === 0) continue;
+
+    const { ordered, totalDistanceKm, legs } = await orderStopsByProximity(dayPlaces);
     const { durationMin, estimatedCost } = calculateClusterMetrics(clusterGroups, dailyBudgetUsd);
 
     days.push({
@@ -584,10 +610,9 @@ export function buildUniversalItinerary(places: OptimizerPlace[], constraints: T
       totalDurationMin: Math.round(durationMin) + MEAL_DURATION_MIN,
       estimatedDayCostUsd: Math.round(estimatedCost),
     });
-  });
+  }
 
-  days = enforceStrictDayLimits(days, dailyBudgetUsd);
-
+  days = await enforceStrictDayLimits(days, dailyBudgetUsd);
   days.forEach((d, idx) => (d.dayNumber = idx + 1));
 
   return days;

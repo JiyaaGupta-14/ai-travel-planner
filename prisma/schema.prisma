@@ -51,10 +51,12 @@ model Place {
   googlePlaceId String     @unique
   name          String
   category      String?
+  destination   String?
   latitude      Float
   longitude     Float
   priceLevel    Int?
   rating        Float?
   description   String?
+  embedding     Unsupported("vector(3072)")?
   stops         TripStop[]
 }

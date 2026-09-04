@@ -11,7 +11,12 @@ export async function generateDayNarrative(day: DayPlan, destination: string): P
 
   const prompt = `You are a friendly travel guide. Write a short, engaging 2-3 sentence description for Day ${day.dayNumber} of a trip to ${destination}.
 The stops for this day, in visiting order, are: ${stopNames}.
-Mention the order naturally (e.g. "start at X, then head to Y"). Keep it concise and avoid generic filler.`;
+
+Rules:
+- Only describe the order of visiting (e.g. "start at X, then head to Y").
+- Do NOT invent specific street names, neighborhoods, piazzas, or distances between stops — you don't have that information and may get it wrong.
+- Keep descriptions general and about the places themselves, not the route between them.
+- Keep it concise and avoid generic filler.`;
 
   const result = await ai.models.generateContent({
     model: "gemini-3.5-flash-lite",
